@@ -12,12 +12,14 @@ const { Pool } = pkg;
 const app = express();
 
 /* ================= DATABASE ================= */
+/* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production"
-    ? { rejectUnauthorized: false }
-    : false,
+    ? { rejectUnauthorized: false }  // <- THIS IS REQUIRED for Railway
+    : false
 });
+
 
 // Test DB connection (DO NOT exit process on failure in Railway)
 (async () => {
