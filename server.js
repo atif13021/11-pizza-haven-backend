@@ -7,36 +7,30 @@ import dotenv from "dotenv";
 import pkg from "pg";
 
 dotenv.config();
-
 const { Pool } = pkg;
+
 const app = express();
 
 /* ================= DATABASE ================= */
-/* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production"
-    ? { rejectUnauthorized: false }  // <- THIS IS REQUIRED for Railway
-    : false
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
-
-// Test DB connection (DO NOT exit process on failure in Railway)
+// Test DB connection
 (async () => {
   try {
-    await pool.query("SELECT 1");
-    console.log("✅ PostgreSQL connected");
+    const res = await pool.query("SELECT NOW()");
+    console.log("✅ PostgreSQL connected:", res.rows[0]);
   } catch (err) {
     console.error("❌ PostgreSQL connection failed:", err);
   }
 })();
 
 /* ================= MIDDLEWARE ================= */
-app.set("trust proxy", 1); // REQUIRED for Railway + sessions
-
 app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  credentials: true,
+  origin: ["https://11pizzahaven.netlify.app"], // frontend URLs
+  credentials: true, // important: allow cookies for admin fetches
 }));
 
 app.use(express.json());
@@ -46,43 +40,38 @@ app.use(session({
   secret: process.env.SESSION_SECRET || "fallback_secret",
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    secure: false,          // Railway terminates SSL before Node
-    httpOnly: true,
-    sameSite: "lax",
-    maxAge: 1000 * 60 * 60,
-  },
+  cookie: { secure: false, httpOnly: true, sameSite: "lax", maxAge: 1000 * 60 * 60 },
 }));
 
 /* ================= ADMIN ================= */
 const adminUser = {
   username: "Owner",
-  passwordHash: "$2a$10$Yk.2KdOdPUENankA9Y.p8.oRkqAO0vQfJB.msmQG4Fh.tLopedroW",
+  passwordHash: "$2a$10$Yk.2KdOdPUENankA9Y.p8.oRkqAO0vQfJB.msmQG4Fh.tLopedroW", // Owner123
 };
 
 const adminAuth = (req, res, next) => {
-  if (req.session.admin === true) return next();
-  return res.status(401).json({ success: false });
+  if (req.session.admin) return next();
+  res.status(401).json({ error: "Unauthorized" });
 };
 
+// Admin login
 app.post("/admin/login", async (req, res) => {
   const { username, password } = req.body;
-
-  if (username !== adminUser.username) {
-    return res.status(401).json({ success: false });
-  }
+  if (username !== adminUser.username) return res.status(401).json({ success: false });
 
   const match = await bcrypt.compare(password, adminUser.passwordHash);
-  if (!match) {
-    return res.status(401).json({ success: false });
-  }
+  if (!match) return res.status(401).json({ success: false });
 
   req.session.admin = true;
   res.json({ success: true });
 });
 
+// Admin logout
 app.post("/admin/logout", (req, res) => {
-  req.session.destroy(() => res.json({ success: true }));
+  req.session.destroy(() => {
+    res.clearCookie("pizza.sid");
+    res.json({ success: true });
+  });
 });
 
 /* ================= PIZZAS ================= */
@@ -91,23 +80,21 @@ app.get("/api/pizzas", async (_req, res) => {
     const { rows } = await pool.query("SELECT * FROM pizzas ORDER BY id");
     res.json(rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("GET PIZZAS ERROR:", err);
+    res.status(500).json([]);
   }
 });
 
 app.post("/api/pizzas", adminAuth, async (req, res) => {
   const { name, price, image } = req.body;
+  if (!name || !price || !image) return res.status(400).json({ error: "Missing fields" });
 
   try {
-    await pool.query(
-      "INSERT INTO pizzas (name, price, image) VALUES ($1,$2,$3)",
-      [name, Number(price), image]
-    );
+    await pool.query("INSERT INTO pizzas (name, price, image) VALUES ($1,$2,$3)", [name, Number(price), image]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("ADD PIZZA ERROR:", err);
+    res.status(500).json({ error: "Failed to add pizza" });
   }
 });
 
@@ -116,91 +103,111 @@ app.delete("/api/pizzas/:id", adminAuth, async (req, res) => {
     await pool.query("DELETE FROM pizzas WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("DELETE PIZZA ERROR:", err);
+    res.status(500).json({ success: false });
   }
 });
 
 /* ================= ORDERS ================= */
 app.get("/api/orders", adminAuth, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM orders ORDER BY created_at DESC"
-    );
-    res.json(rows);
+    const { rows } = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
+    const fixed = rows.map(o => ({
+      ...o,
+      items: typeof o.items === "string" ? JSON.parse(o.items) : o.items,
+      payment_method: o.payment_method || "N/A",
+      payment_status: o.payment_status || "Pending"
+    }));
+    res.json(fixed);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("GET ORDERS ERROR:", err);
+    res.status(500).json([]);
   }
 });
 
 app.post("/api/orders", async (req, res) => {
   const { name, phone, address, items, total, paymentMethod } = req.body;
-  const paymentStatus = paymentMethod === "COD" ? "COD" : "Pending";
+  const payment_method = paymentMethod || "N/A";
+  const payment_status = payment_method === "COD" ? "Paid" : "Pending";
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO orders
-      (name, phone, address, items, total, payment_method, payment_status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
-      RETURNING id`,
-      [
-        name,
-        phone,
-        address,
-        JSON.stringify(items),
-        total,
-        paymentMethod,
-        paymentStatus,
-      ]
+      `INSERT INTO orders (name, phone, address, items, total, payment_method, payment_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [name, phone, address, JSON.stringify(items), total, payment_method, payment_status]
     );
-
-    res.json({
-      orderId: rows[0].id,
-      paymentRequired: paymentMethod !== "COD",
-    });
+    res.json({ orderId: rows[0].id, paymentRequired: payment_method !== "COD" });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("ADD ORDER ERROR:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
+app.patch("/api/orders/:id", adminAuth, async (req, res) => {
+  const { id } = req.params;
+  const { payment_status } = req.body;
+
+  if (!payment_status || !["Pending", "Paid"].includes(payment_status)) {
+    return res.status(400).json({ error: "Invalid or missing payment_status" });
+  }
+
+  try {
+    const result = await pool.query(
+      "UPDATE orders SET payment_status=$1 WHERE id=$2 RETURNING *",
+      [payment_status, id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("UPDATE ORDER ERROR:", err);
+    res.status(500).json({ error: "Failed to update order" });
+  }
+});
+
+app.delete("/api/orders/:id", adminAuth, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM orders WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE ORDER ERROR:", err);
+    res.status(500).json({ success: false });
   }
 });
 
 /* ================= MESSAGES ================= */
 app.get("/api/messages", adminAuth, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM messages ORDER BY created_at DESC"
-    );
+    const { rows } = await pool.query("SELECT * FROM messages ORDER BY created_at DESC");
     res.json(rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("GET MESSAGES ERROR:", err);
+    res.status(500).json([]);
   }
 });
 
 app.post("/api/messages", async (req, res) => {
   const { name, email, message } = req.body;
-
   try {
-    await pool.query(
-      "INSERT INTO messages (name,email,message) VALUES ($1,$2,$3)",
-      [name, email, message]
-    );
+    await pool.query("INSERT INTO messages (name,email,message) VALUES ($1,$2,$3)", [name,email,message]);
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error" });
+    console.error("ADD MESSAGE ERROR:", err);
+    res.status(500).json({ success: false });
   }
 });
 
-/* ================= HEALTH ================= */
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+app.delete("/api/messages/:id", adminAuth, async (req, res) => {
+  try {
+    await pool.query("DELETE FROM messages WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE MESSAGE ERROR:", err);
+    res.status(500).json({ success: false });
+  }
 });
 
-/* ================= START ================= */
+/* ================= HEALTH CHECK ================= */
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
+
+/* ================= START SERVER ================= */
 const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 Backend running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
