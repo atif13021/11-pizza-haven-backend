@@ -58,7 +58,7 @@ app.use(
 const adminUser = {
   username: "Owner",
   // bcrypt hash of password "Atif123"
-  passwordHash: "$2b$10$KIX7YzpuTzF/YwqevM7IQeJY9s6w1G9nzHDdJ6Z2tP3WvCVF/JhtG",
+  passwordHash: "$2a$12$eJsy0AZdlsajWH4wCXGKD.1ZQ5b6xe9PGRwG6HlgTcddSKP3rEpnC",
 };
 
 // Protect admin routes
