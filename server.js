@@ -32,12 +32,12 @@ app.use(express.json());
 
 app.use(
   cors({
-    origin: ["http://localhost:3000", "https://11-pizzahaven.netlify.app"],
+    origin: ["http://localhost:3000", "https://11pizzahaven.netlify.app"],
     credentials: true,
   })
 );
 
-app.set("trust proxy", 1);
+app.set("trust proxy", 1); // required for secure cookies behind proxies
 
 app.use(
   session({
@@ -47,15 +47,14 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: false, // false for localhost, true for production HTTPS
+      secure: process.env.NODE_ENV === "production", // true on HTTPS
       sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 1000 * 60 * 60,
+      maxAge: 1000 * 60 * 60, // 1 hour
     },
   })
 );
 
 /* ================= ADMIN ================= */
-// Admin credentials
 const adminUser = {
   username: "Owner",
   // bcrypt hash of password "Atif123"
@@ -79,7 +78,7 @@ app.post("/admin/login", async (req, res) => {
     const match = await bcrypt.compare(password, adminUser.passwordHash);
     if (!match) return res.status(401).json({ success: false });
 
-    req.session.admin = true; // ✅ set session
+    req.session.admin = true;
     res.json({ success: true });
   } catch (err) {
     console.error("LOGIN ERROR:", err);
@@ -100,16 +99,18 @@ app.post("/admin/logout", (req, res) => {
 });
 
 /* ================= PIZZAS ================= */
-app.get("/api/pizzas", adminAuth, async (_req, res) => {
+// Public GET
+app.get("/api/pizzas", async (_req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM pizzas ORDER BY id");
-    res.json(rows);
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.error("GET PIZZAS ERROR:", err);
     res.status(500).json([]);
   }
 });
 
+// Admin CRUD
 app.post("/api/pizzas", adminAuth, async (req, res) => {
   try {
     const { name, price, image } = req.body;
@@ -138,6 +139,29 @@ app.delete("/api/pizzas/:id", adminAuth, async (req, res) => {
 });
 
 /* ================= ORDERS ================= */
+// Public POST (anyone can order)
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { name, phone, address, items, total, paymentMethod } = req.body;
+    const payment_method = paymentMethod || "COD";
+    const payment_status = payment_method === "COD" ? "Paid" : "Pending";
+
+    const { rows } = await pool.query(
+      `INSERT INTO orders
+      (name, phone, address, items, total, payment_method, payment_status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      RETURNING id`,
+      [name, phone, address, JSON.stringify(items), total, payment_method, payment_status]
+    );
+
+    res.json({ orderId: rows[0].id, paymentRequired: payment_method !== "COD" });
+  } catch (err) {
+    console.error("ADD ORDER ERROR:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Admin GET, PATCH, DELETE
 app.get("/api/orders", adminAuth, async (_req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
@@ -155,7 +179,10 @@ app.get("/api/orders", adminAuth, async (_req, res) => {
 app.patch("/api/orders/:id", adminAuth, async (req, res) => {
   try {
     const { payment_status } = req.body;
-    await pool.query("UPDATE orders SET payment_status=$1 WHERE id=$2", [payment_status, req.params.id]);
+    await pool.query("UPDATE orders SET payment_status=$1 WHERE id=$2", [
+      payment_status,
+      req.params.id,
+    ]);
     res.json({ success: true });
   } catch (err) {
     console.error("UPDATE ORDER ERROR:", err);
@@ -174,6 +201,23 @@ app.delete("/api/orders/:id", adminAuth, async (req, res) => {
 });
 
 /* ================= MESSAGES ================= */
+// Public POST (anyone can send message)
+app.post("/api/messages", async (req, res) => {
+  try {
+    const { name, email, message } = req.body;
+    await pool.query("INSERT INTO messages (name,email,message) VALUES ($1,$2,$3)", [
+      name,
+      email,
+      message,
+    ]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("ADD MESSAGE ERROR:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Admin GET/DELETE
 app.get("/api/messages", adminAuth, async (_req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM messages ORDER BY created_at DESC");
