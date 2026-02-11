@@ -11,23 +11,17 @@ const { Pool } = pkg;
 
 const app = express();
 
-/* ================= TRUST PROXY (IMPORTANT FOR RAILWAY) ================= */
-app.set("trust proxy", 1);
-
 /* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.NODE_ENV === "production"
-      ? { rejectUnauthorized: false }
-      : false,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
 // Test DB connection
 (async () => {
   try {
-    await pool.query("SELECT 1");
-    console.log("✅ PostgreSQL connected");
+    const res = await pool.query("SELECT NOW()");
+    console.log("✅ PostgreSQL connected:", res.rows[0]);
   } catch (err) {
     console.error("❌ PostgreSQL connection failed:", err);
   }
@@ -38,95 +32,77 @@ app.use(express.json());
 
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:5173",
-      "https://11-pizzahaven.netlify.app",
-    ],
+    origin: ["http://localhost:3000", "https://11-pizzahaven.netlify.app"],
     credentials: true,
   })
 );
 
-/* ================= SESSION ================= */
+app.set("trust proxy", 1);
+
 app.use(
   session({
     name: "pizza.sid",
     secret: process.env.SESSION_SECRET || "mysupersecret",
     resave: false,
     saveUninitialized: false,
-    proxy: true,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite:
-        process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 1000 * 60 * 60, // 1 hour
+      secure: false, // false for localhost, true for production HTTPS
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      maxAge: 1000 * 60 * 60,
     },
   })
 );
 
-/* ================= ADMIN USER ================= */
+/* ================= ADMIN ================= */
+// Admin credentials
 const adminUser = {
   username: "Owner",
-  passwordHash:
-    "$2a$10$Yk.2KdOdPUENankA9Y.p8.oRkqAO0vQfJB.msmQG4Fh.tLopedroW", // Owner123
+  // bcrypt hash of password "Atif123"
+  passwordHash: "$2b$10$KIX7YzpuTzF/YwqevM7IQeJY9s6w1G9nzHDdJ6Z2tP3WvCVF/JhtG",
 };
 
-/* ================= AUTH MIDDLEWARE ================= */
-function adminAuth(req, res, next) {
-  if (req.session && req.session.admin) {
-    return next();
-  }
+// Protect admin routes
+const adminAuth = (req, res, next) => {
+  if (req.session.admin) return next();
   return res.status(401).json({ error: "Unauthorized" });
-}
+};
 
-/* ================= LOGIN ================= */
+/* ================= LOGIN / LOGOUT ================= */
 app.post("/admin/login", async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    if (username !== adminUser.username) {
+    if (username !== adminUser.username)
       return res.status(401).json({ success: false });
-    }
 
-    const match = await bcrypt.compare(
-      password,
-      adminUser.passwordHash
-    );
+    const match = await bcrypt.compare(password, adminUser.passwordHash);
+    if (!match) return res.status(401).json({ success: false });
 
-    if (!match) {
-      return res.status(401).json({ success: false });
-    }
-
-    req.session.admin = true;
-
-    return res.json({ success: true });
+    req.session.admin = true; // ✅ set session
+    res.json({ success: true });
   } catch (err) {
     console.error("LOGIN ERROR:", err);
-    return res.status(500).json({ success: false });
+    res.status(500).json({ success: false });
   }
 });
 
-/* ================= LOGOUT ================= */
 app.post("/admin/logout", (req, res) => {
   req.session.destroy(() => {
     res.clearCookie("pizza.sid", {
       path: "/",
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite:
-        process.env.NODE_ENV === "production" ? "none" : "lax",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
     });
     res.json({ success: true });
   });
 });
 
 /* ================= PIZZAS ================= */
-app.get("/api/pizzas", async (_req, res) => {
+app.get("/api/pizzas", adminAuth, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM pizzas ORDER BY id"
-    );
+    const { rows } = await pool.query("SELECT * FROM pizzas ORDER BY id");
     res.json(rows);
   } catch (err) {
     console.error("GET PIZZAS ERROR:", err);
@@ -137,16 +113,13 @@ app.get("/api/pizzas", async (_req, res) => {
 app.post("/api/pizzas", adminAuth, async (req, res) => {
   try {
     const { name, price, image } = req.body;
+    if (!name || !price || !image) return res.status(400).json({ error: "Missing fields" });
 
-    if (!name || !price || !image) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    await pool.query(
-      "INSERT INTO pizzas (name, price, image) VALUES ($1,$2,$3)",
-      [name, Number(price), image]
-    );
-
+    await pool.query("INSERT INTO pizzas (name, price, image) VALUES ($1,$2,$3)", [
+      name,
+      Number(price),
+      image,
+    ]);
     res.json({ success: true });
   } catch (err) {
     console.error("ADD PIZZA ERROR:", err);
@@ -156,9 +129,7 @@ app.post("/api/pizzas", adminAuth, async (req, res) => {
 
 app.delete("/api/pizzas/:id", adminAuth, async (req, res) => {
   try {
-    await pool.query("DELETE FROM pizzas WHERE id=$1", [
-      req.params.id,
-    ]);
+    await pool.query("DELETE FROM pizzas WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE PIZZA ERROR:", err);
@@ -169,18 +140,11 @@ app.delete("/api/pizzas/:id", adminAuth, async (req, res) => {
 /* ================= ORDERS ================= */
 app.get("/api/orders", adminAuth, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM orders ORDER BY created_at DESC"
-    );
-
+    const { rows } = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
     const fixed = rows.map((o) => ({
       ...o,
-      items:
-        typeof o.items === "string"
-          ? JSON.parse(o.items)
-          : o.items,
+      items: typeof o.items === "string" ? JSON.parse(o.items) : o.items,
     }));
-
     res.json(fixed);
   } catch (err) {
     console.error("GET ORDERS ERROR:", err);
@@ -188,50 +152,10 @@ app.get("/api/orders", adminAuth, async (_req, res) => {
   }
 });
 
-app.post("/api/orders", async (req, res) => {
-  try {
-    const { name, phone, address, items, total, paymentMethod } =
-      req.body;
-
-    const payment_method = paymentMethod || "COD";
-    const payment_status =
-      payment_method === "COD" ? "Paid" : "Pending";
-
-    const { rows } = await pool.query(
-      `INSERT INTO orders
-       (name, phone, address, items, total, payment_method, payment_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING id`,
-      [
-        name,
-        phone,
-        address,
-        JSON.stringify(items),
-        total,
-        payment_method,
-        payment_status,
-      ]
-    );
-
-    res.json({
-      orderId: rows[0].id,
-      paymentRequired: payment_method !== "COD",
-    });
-  } catch (err) {
-    console.error("ADD ORDER ERROR:", err);
-    res.status(500).json({ success: false });
-  }
-});
-
 app.patch("/api/orders/:id", adminAuth, async (req, res) => {
   try {
     const { payment_status } = req.body;
-
-    await pool.query(
-      "UPDATE orders SET payment_status=$1 WHERE id=$2",
-      [payment_status, req.params.id]
-    );
-
+    await pool.query("UPDATE orders SET payment_status=$1 WHERE id=$2", [payment_status, req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error("UPDATE ORDER ERROR:", err);
@@ -241,9 +165,7 @@ app.patch("/api/orders/:id", adminAuth, async (req, res) => {
 
 app.delete("/api/orders/:id", adminAuth, async (req, res) => {
   try {
-    await pool.query("DELETE FROM orders WHERE id=$1", [
-      req.params.id,
-    ]);
+    await pool.query("DELETE FROM orders WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE ORDER ERROR:", err);
@@ -254,9 +176,7 @@ app.delete("/api/orders/:id", adminAuth, async (req, res) => {
 /* ================= MESSAGES ================= */
 app.get("/api/messages", adminAuth, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM messages ORDER BY created_at DESC"
-    );
+    const { rows } = await pool.query("SELECT * FROM messages ORDER BY created_at DESC");
     res.json(rows);
   } catch (err) {
     console.error("GET MESSAGES ERROR:", err);
@@ -264,30 +184,19 @@ app.get("/api/messages", adminAuth, async (_req, res) => {
   }
 });
 
-app.post("/api/messages", async (req, res) => {
+app.delete("/api/messages/:id", adminAuth, async (req, res) => {
   try {
-    const { name, email, message } = req.body;
-
-    await pool.query(
-      "INSERT INTO messages (name,email,message) VALUES ($1,$2,$3)",
-      [name, email, message]
-    );
-
+    await pool.query("DELETE FROM messages WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    console.error("ADD MESSAGE ERROR:", err);
+    console.error("DELETE MESSAGE ERROR:", err);
     res.status(500).json({ success: false });
   }
 });
 
-/* ================= HEALTH ================= */
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
-});
+/* ================= HEALTH CHECK ================= */
+app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 /* ================= START SERVER ================= */
 const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 Backend running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
