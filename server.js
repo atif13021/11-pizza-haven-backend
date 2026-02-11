@@ -11,7 +11,7 @@ const { Pool } = pkg;
 
 const app = express();
 
-/* ================= IMPORTANT FOR RAILWAY ================= */
+/* ================= TRUST PROXY (IMPORTANT FOR RAILWAY) ================= */
 app.set("trust proxy", 1);
 
 /* ================= DATABASE ================= */
@@ -26,8 +26,8 @@ const pool = new Pool({
 // Test DB connection
 (async () => {
   try {
-    const res = await pool.query("SELECT NOW()");
-    console.log("✅ PostgreSQL connected:", res.rows[0]);
+    await pool.query("SELECT 1");
+    console.log("✅ PostgreSQL connected");
   } catch (err) {
     console.error("❌ PostgreSQL connection failed:", err);
   }
@@ -40,12 +40,14 @@ app.use(
   cors({
     origin: [
       "http://localhost:3000",
+      "http://localhost:5173",
       "https://11-pizzahaven.netlify.app",
     ],
     credentials: true,
   })
 );
 
+/* ================= SESSION ================= */
 app.use(
   session({
     name: "pizza.sid",
@@ -70,12 +72,15 @@ const adminUser = {
     "$2a$10$Yk.2KdOdPUENankA9Y.p8.oRkqAO0vQfJB.msmQG4Fh.tLopedroW", // Owner123
 };
 
+/* ================= AUTH MIDDLEWARE ================= */
 function adminAuth(req, res, next) {
-  if (req.session.admin) return next();
+  if (req.session && req.session.admin) {
+    return next();
+  }
   return res.status(401).json({ error: "Unauthorized" });
 }
 
-/* ================= ADMIN LOGIN ================= */
+/* ================= LOGIN ================= */
 app.post("/admin/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -102,10 +107,16 @@ app.post("/admin/login", async (req, res) => {
   }
 });
 
-/* ================= ADMIN LOGOUT ================= */
+/* ================= LOGOUT ================= */
 app.post("/admin/logout", (req, res) => {
   req.session.destroy(() => {
-    res.clearCookie("pizza.sid");
+    res.clearCookie("pizza.sid", {
+      path: "/",
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite:
+        process.env.NODE_ENV === "production" ? "none" : "lax",
+    });
     res.json({ success: true });
   });
 });
@@ -269,24 +280,12 @@ app.post("/api/messages", async (req, res) => {
   }
 });
 
-app.delete("/api/messages/:id", adminAuth, async (req, res) => {
-  try {
-    await pool.query("DELETE FROM messages WHERE id=$1", [
-      req.params.id,
-    ]);
-    res.json({ success: true });
-  } catch (err) {
-    console.error("DELETE MESSAGE ERROR:", err);
-    res.status(500).json({ success: false });
-  }
-});
-
 /* ================= HEALTH ================= */
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-/* ================= START ================= */
+/* ================= START SERVER ================= */
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
